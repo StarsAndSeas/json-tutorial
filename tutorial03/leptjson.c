@@ -59,32 +59,58 @@ static int lept_parse_literal(lept_context* c, lept_value* v, const char* litera
 }
 
 static int lept_parse_number(lept_context* c, lept_value* v) {
-    const char* p = c->json;
-    if (*p == '-') p++;
-    if (*p == '0') p++;
-    else {
-        if (!ISDIGIT1TO9(*p)) return LEPT_PARSE_INVALID_VALUE;
-        for (p++; ISDIGIT(*p); p++);
-    }
-    if (*p == '.') {
-        p++;
-        if (!ISDIGIT(*p)) return LEPT_PARSE_INVALID_VALUE;
-        for (p++; ISDIGIT(*p); p++);
-    }
-    if (*p == 'e' || *p == 'E') {
-        p++;
-        if (*p == '+' || *p == '-') p++;
-        if (!ISDIGIT(*p)) return LEPT_PARSE_INVALID_VALUE;
-        for (p++; ISDIGIT(*p); p++);
-    }
+    char* end;
+    int point_flag = 0, pre_exp = 0, first_ch = 1, begin_zero = 0;
+    const char* temp = c->json;
     errno = 0;
-    v->u.n = strtod(c->json, NULL);
-    if (errno == ERANGE && (v->u.n == HUGE_VAL || v->u.n == -HUGE_VAL))
-        return LEPT_PARSE_NUMBER_TOO_BIG;
+    while(*temp != '\0') {
+        if(begin_zero && *temp != '.' && *temp != 'E' && *temp != 'e')  return LEPT_PARSE_ROOT_NOT_SINGULAR;
+        switch(ISDIGIT(*temp)) {
+            /* 非数字0-9 */
+            case 0: {
+                switch (*temp) {
+                    case '-' :  if(!first_ch && !pre_exp)    return LEPT_PARSE_INVALID_VALUE;
+                                else if(pre_exp)    pre_exp = 0;
+                                break;  /* 负号直接跳过 */
+                    case '.' :  if(first_ch || point_flag || pre_exp || !ISDIGIT(*(temp+ 1)))   return LEPT_PARSE_INVALID_VALUE; /* 小数点只能出现一次，且之后必须有数字 */
+                                point_flag = 1; 
+                                break;
+                    case '+' :  if(!pre_exp)    return LEPT_PARSE_INVALID_VALUE;    /* +号只能出现在E或e之后 */
+                                pre_exp = 0; 
+                                break;
+                    case 'E' : case 'e' :   if(pre_exp) return LEPT_PARSE_INVALID_VALUE;
+                                            pre_exp = 1;   
+                                            break;
+                    default :   return LEPT_PARSE_INVALID_VALUE;
+                }
+                break;
+            } 
+            /* 数字0-9 */
+            default: {
+                if(pre_exp) pre_exp = 0;
+                switch(ISDIGIT1TO9(*temp)) {
+                    case 0 : if(first_ch)  begin_zero = 1;  break;  /* 数字0若不是第一个字符直接跳过 */
+                    default : if(begin_zero)    return LEPT_PARSE_INVALID_VALUE;    break;  /* 若是数字0开头且后面有非0数字，则判定非法，否则跳过 */
+                }
+                break;
+            }
+        }
+        temp++;
+        if(first_ch)
+            first_ch = 0;
+    }
+
+    /* \TODO validate number */
+    v->u.n = strtod(c->json, &end);
+    /* strod()函数输入参数超出数学函数定义的范围时发生，errno 被设置为 ERANGE，返回值设置为0，因此下溢情况不必处理自动判定为0 */
+    if(errno == ERANGE && (v->u.n == HUGE_VAL || v->u.n== -HUGE_VAL)) return LEPT_PARSE_NUMBER_TOO_BIG;
+    if (c->json == end) return LEPT_PARSE_INVALID_VALUE;
+    c->json = end;
     v->type = LEPT_NUMBER;
-    c->json = p;
     return LEPT_PARSE_OK;
 }
+
+#define STRING_ERROR(ret) do { c->top = head; return ret; } while(0)
 
 static int lept_parse_string(lept_context* c, lept_value* v) {
     size_t head = c->top, len;
@@ -94,15 +120,31 @@ static int lept_parse_string(lept_context* c, lept_value* v) {
     for (;;) {
         char ch = *p++;
         switch (ch) {
-            case '\"':
+             case '\"' :    /* 字符串末尾 */
                 len = c->top - head;
                 lept_set_string(v, (const char*)lept_context_pop(c, len), len);
                 c->json = p;
                 return LEPT_PARSE_OK;
+            case '\\':
+                switch (*p++) {
+                    case '\"': PUTC(c, '\"'); break;
+                    case '\\': PUTC(c, '\\'); break;
+                    case '/':  PUTC(c, '/' ); break;
+                    case 'b':  PUTC(c, '\b'); break;
+                    case 'f':  PUTC(c, '\f'); break;
+                    case 'n':  PUTC(c, '\n'); break;
+                    case 'r':  PUTC(c, '\r'); break;
+                    case 't':  PUTC(c, '\t'); break;
+                    default:
+                        STRING_ERROR(LEPT_PARSE_INVALID_STRING_ESCAPE);
+                }
+                break;
             case '\0':
-                c->top = head;
-                return LEPT_PARSE_MISS_QUOTATION_MARK;
+                STRING_ERROR(LEPT_PARSE_MISS_QUOTATION_MARK);
+
             default:
+                if((unsigned char)ch < 0x20)
+                    STRING_ERROR(LEPT_PARSE_INVALID_STRING_CHAR);
                 PUTC(c, ch);
         }
     }
@@ -154,11 +196,14 @@ lept_type lept_get_type(const lept_value* v) {
 
 int lept_get_boolean(const lept_value* v) {
     /* \TODO */
-    return 0;
+    assert(v != NULL && ( v->type == LEPT_TRUE || v->type == LEPT_FALSE ));
+    return v->type == LEPT_TRUE;
 }
 
 void lept_set_boolean(lept_value* v, int b) {
     /* \TODO */
+    lept_free(v);
+    v->type = b ? LEPT_TRUE : LEPT_FALSE;
 }
 
 double lept_get_number(const lept_value* v) {
@@ -168,6 +213,9 @@ double lept_get_number(const lept_value* v) {
 
 void lept_set_number(lept_value* v, double n) {
     /* \TODO */
+    lept_free(v);
+    v->u.n = n;
+    v->type = LEPT_NUMBER;
 }
 
 const char* lept_get_string(const lept_value* v) {
