@@ -1,7 +1,7 @@
 #ifndef LEPTJSON_H__
 #define LEPTJSON_H__
 
-typedef enum { LEPT_NULL, LEPT_FALSE, LEPT_TRUE, LEPT_NUMBER, LEPT_STRING, LEPT_ARRAY, LEPT_OBJECT } lept_type;
+typedef enum { LEPT_NULL, LEPT_FALSE, LEPT_TRUE, LEPT_NUMBER, LEPT_STRING, LEPT_ARRAY, LEPT_OBJEC, LEPT_INIT } lept_type;
 
 typedef struct {
     double n;
