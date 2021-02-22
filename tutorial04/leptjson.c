@@ -62,41 +62,80 @@ static int lept_parse_literal(lept_context* c, lept_value* v, const char* litera
     return LEPT_PARSE_OK;
 }
 
+
 static int lept_parse_number(lept_context* c, lept_value* v) {
-    const char* p = c->json;
-    if (*p == '-') p++;
-    if (*p == '0') p++;
-    else {
-        if (!ISDIGIT1TO9(*p)) return LEPT_PARSE_INVALID_VALUE;
-        for (p++; ISDIGIT(*p); p++);
-    }
-    if (*p == '.') {
-        p++;
-        if (!ISDIGIT(*p)) return LEPT_PARSE_INVALID_VALUE;
-        for (p++; ISDIGIT(*p); p++);
-    }
-    if (*p == 'e' || *p == 'E') {
-        p++;
-        if (*p == '+' || *p == '-') p++;
-        if (!ISDIGIT(*p)) return LEPT_PARSE_INVALID_VALUE;
-        for (p++; ISDIGIT(*p); p++);
-    }
+    char* end;
+    int point_flag = 0, pre_exp = 0, first_ch = 1, begin_zero = 0;
+    const char* temp = c->json;
     errno = 0;
-    v->u.n = strtod(c->json, NULL);
-    if (errno == ERANGE && (v->u.n == HUGE_VAL || v->u.n == -HUGE_VAL))
-        return LEPT_PARSE_NUMBER_TOO_BIG;
+    while(*temp != '\0') {
+        if(begin_zero && *temp != '.' && *temp != 'E' && *temp != 'e')  return LEPT_PARSE_ROOT_NOT_SINGULAR;
+        switch(ISDIGIT(*temp)) {
+            /* 非数字0-9 */
+            case 0: {
+                switch (*temp) {
+                    case '-' :  if(!first_ch && !pre_exp)    return LEPT_PARSE_INVALID_VALUE;
+                                else if(pre_exp)    pre_exp = 0;
+                                break;  /* 负号直接跳过 */
+                    case '.' :  if(first_ch || point_flag || pre_exp || !ISDIGIT(*(temp+ 1)))   return LEPT_PARSE_INVALID_VALUE; /* 小数点只能出现一次，且之后必须有数字 */
+                                point_flag = 1; 
+                                break;
+                    case '+' :  if(!pre_exp)    return LEPT_PARSE_INVALID_VALUE;    /* +号只能出现在E或e之后 */
+                                pre_exp = 0; 
+                                break;
+                    case 'E' : case 'e' :   if(pre_exp) return LEPT_PARSE_INVALID_VALUE;
+                                            pre_exp = 1;   
+                                            break;
+                    default :   return LEPT_PARSE_INVALID_VALUE;
+                }
+                break;
+            } 
+            /* 数字0-9 */
+            default: {
+                if(pre_exp) pre_exp = 0;
+                switch(ISDIGIT1TO9(*temp)) {
+                    case 0 : if(first_ch)  begin_zero = 1;  break;  /* 数字0若不是第一个字符直接跳过 */
+                    default : if(begin_zero)    return LEPT_PARSE_INVALID_VALUE;    break;  /* 若是数字0开头且后面有非0数字，则判定非法，否则跳过 */
+                }
+                break;
+            }
+        }
+        temp++;
+        if(first_ch)
+            first_ch = 0;
+    }
+
+    /* \TODO validate number */
+    v->u.n = strtod(c->json, &end);
+    /* strod()函数输入参数超出数学函数定义的范围时发生，errno 被设置为 ERANGE，返回值设置为0，因此下溢情况不必处理自动判定为0 */
+    if(errno == ERANGE && (v->u.n == HUGE_VAL || v->u.n== -HUGE_VAL)) return LEPT_PARSE_NUMBER_TOO_BIG;
+    if (c->json == end) return LEPT_PARSE_INVALID_VALUE;
+    c->json = end;
     v->type = LEPT_NUMBER;
-    c->json = p;
     return LEPT_PARSE_OK;
 }
 
 static const char* lept_parse_hex4(const char* p, unsigned* u) {
     /* \TODO */
+    int i;
+    *u = 0;
+    for(i = 0; i < 4; i++){
+        *u <<= 4;
+        if(*p <= '9' && *p >= '0')  *u += *p++ - '0';
+        else if(*p >= 'a' && *p <= 'f') *u += *p++ - ('a' - 10);
+        else if(*p >= 'A' && *p <= 'F') *u += *p++ - ('A' - 10);
+        else    return NULL;
+    }
     return p;
 }
 
 static void lept_encode_utf8(lept_context* c, unsigned u) {
-    /* \TODO */
+    /* 输入码点必须在0x0000 ~ 0x10FFFFF范围内 */
+    assert(u <= 0x10FFFFF);
+    if (u <= 0x007F) PUTC(c, u & 0x7F);
+    else if (u >= 0x0080 && u <= 0x07FF){ PUTC(c, 0xC0 | ((u >> 6) & 0x1F)); PUTC(c, 0x80 | (u & 0x3F));}
+    else if (u >= 0x0800 && u <= 0xFFFF){ PUTC(c, 0xE0 | ((u >> 12) & 0x0F)); PUTC(c, 0x80 | ((u >> 6) & 0x3F)); PUTC(c, 0x80 | (u & 0x3F)); }
+    else if (u >= 0x10000 && u <= 0x10FFFF){ PUTC(c, 0xF0 | ((u >> 18) & 0x07)); PUTC(c, 0x80 | ((u >> 12) & 0x3F)); PUTC(c, 0x80 | ((u >> 6) & 0x3F)); PUTC(c, 0x80 | (u & 0x3F)); }
 }
 
 #define STRING_ERROR(ret) do { c->top = head; return ret; } while(0)
@@ -128,6 +167,17 @@ static int lept_parse_string(lept_context* c, lept_value* v) {
                     case 'u':
                         if (!(p = lept_parse_hex4(p, &u)))
                             STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
+                        if (u >= 0xD800 && u <= 0xDBFF) {
+                            unsigned t;
+                            /* 下一个仍是\u转义字符 */
+                            if (*p++ == '\\' && *p++ == 'u') {
+                                if (!(p = lept_parse_hex4(p, &t)))
+                                    STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
+                                if(t >= 0xDC00 && t <= 0xDFFF)  u = 0x10000 + (u - 0xD800) * 0x400 + (t - 0xDC00);
+                                else    return LEPT_PARSE_INVALID_UNICODE_SURROGATE;
+                            }
+                            else return LEPT_PARSE_INVALID_UNICODE_SURROGATE;
+                        }
                         /* \TODO surrogate handling */
                         lept_encode_utf8(c, u);
                         break;
