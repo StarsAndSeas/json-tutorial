@@ -174,9 +174,9 @@ static int lept_parse_string(lept_context* c, lept_value* v) {
                                 if (!(p = lept_parse_hex4(p, &t)))
                                     STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
                                 if(t >= 0xDC00 && t <= 0xDFFF)  u = 0x10000 + (u - 0xD800) * 0x400 + (t - 0xDC00);
-                                else    return LEPT_PARSE_INVALID_UNICODE_SURROGATE;
+                                else    STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
                             }
-                            else return LEPT_PARSE_INVALID_UNICODE_SURROGATE;
+                            else STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
                         }
                         /* \TODO surrogate handling */
                         lept_encode_utf8(c, u);
